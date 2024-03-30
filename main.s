@@ -42,8 +42,8 @@ Entrypoint:
 Main:
 	call WaitForNextVBlank
 	
-	ld bc, $0202
-	call CalculateNextAtPosition
+	ld bc, $0102
+	call NextGenerationForCell
 	
 	call WaitForNextVBlank
 
@@ -66,6 +66,39 @@ WaitForNextVBlank:
 	ld a, [rLY]
 	cp a, 144
 	jr c, .wait
+	ret
+	
+; Calculate next generation into wBuffer
+; @param b: X
+; @param c: Y
+NextGenerationForCell:
+	push af
+	call ScreenToTile
+	ld   a, [hl]
+	dec  a
+	jp   z, .alive
+
+	; dead
+	call CountNeighbors
+	cp   a, 3
+	jp   z, .birth
+	jp   .knownret		; already dead, no need to kill
+.alive
+	call CountNeighbors
+	cp   a, 2		; 2 lives
+	jp   z, .knownret	; already alive, no need to birth
+	cp   a, 3		; 3 lives
+	jp   z, .knownret	; already alive, no need to birth
+	; fallthrough
+.death
+	ld   [hl], $00
+	jp   .knownret
+	
+.birth
+	ld   [hl], $01
+	; fallthrough 
+.knownret
+	pop  af
 	ret
 
 ; Check if position is within board
@@ -93,7 +126,7 @@ CheckValidPosition:
 ; @param b: X
 ; @param c: Y
 ; @return a: count live neighbors
-CalculateNextAtPosition:
+CountNeighbors:
 	push hl
 	push de
 	ld   a, 0
@@ -183,33 +216,6 @@ CalculateNextAtPosition:
 	pop de
 	pop hl
 	ret
-	
-; Calculate next generation into wBuffer
-; @param bc: screen coord (restored on return)
-;; NextGenerationForCell:
-;; 	ld a, 0
-;; .topLeft
-;; 	push af
-;; 	dec b
-;; 	dec c
-;; 	; check X in-bounds
-;; 	ld a, b
-;; 	inc a
-;; 	jr c, .tlrestore
-;; 	; check Y in-bounds
-;; 	ld a, c
-;; 	inc a
-;; 	jr z, .tlrestore
-;; 	; check if cell is alive
-;; 	push bc
-;; 	call ScreenToTile
-;; 	pop bc
-;; 	ld a, [hl]
-;; 	cp 1
-;; 	jr nz, .tlrestore
-;; 	pop af
-;; 	inc a
-;; 	jp .top
 
 ; Get tile at screen coords. Uses BC internally.
 ; @param b: x-coord
