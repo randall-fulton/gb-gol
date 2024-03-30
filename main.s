@@ -248,7 +248,7 @@ ScreenToTile:
     	ld  h, a
     	
     	; Add the offset to the tilemap's base address, and we are done!
-    	ld bc, $9800
+    	ld bc, wBuffer
     	add hl, bc
     	
     	pop bc
