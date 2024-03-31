@@ -1,10 +1,11 @@
 INCLUDE "hardware.inc"
 
-DEF WIDTH  EQU 160
-DEF HEIGHT EQU 144
+DEF ROWLEN EQU 20
+DEF ROWS   EQU 18
 
 SECTION "Display buffer", WRAM0
-	wBuffer: ds 32*18
+wBuffer:  ds 32*18
+wBuffer2: ds 32*18
 
 SECTION "Header", ROM0[$0100]
 	jp Entrypoint
@@ -35,23 +36,39 @@ Entrypoint:
 	ld hl, wBuffer
 	ld bc, TilemapEnd - Tilemap
 	call Memcopy
+	
+	ld de, Tilemap
+	ld hl, wBuffer2
+	ld bc, TilemapEnd - Tilemap
+	call Memcopy
 
 	; Turn LCD on
 	ld a, LCDCF_ON | LCDCF_BGON
 	ld [rLCDC], a
 Main:
+	; prepare secondary back buffer for calculation
+	; using a single back buffer would corrupt cell state mid-generation
+	ld de, wBuffer
+	ld hl, wBuffer2
+	ld bc, TilemapEnd - Tilemap
+	call Memcopy
+	
+	call NextGeneration
 	call WaitForNextVBlank
 	
-	ld bc, $0102
-	call NextGenerationForCell
-	
-	call WaitForNextVBlank
+	; Turn off LCD
+	ld a, 0
+	ld [rLCDC], a
 
-.blit	; Blit to screen
+	; Blit to screen
 	ld  de, wBuffer
 	ld hl, $9800
 	ld bc, TilemapEnd - Tilemap
 	call Memcopy
+
+	; Turn LCD on
+	ld a, LCDCF_ON | LCDCF_BGON
+	ld [rLCDC], a
 
 	jp Main
 
@@ -67,13 +84,46 @@ WaitForNextVBlank:
 	cp a, 144
 	jr c, .wait
 	ret
+
+; Calculate next generation for entire back buffer (wBuffer)
+NextGeneration:
+	push bc
+
+	ld   a, ROWLEN		; cells per row
+	ld   bc, $0000		; (0, 0)
+.loop
+	call NextGenerationForCell
+	inc  b		      	; move to next cell horizontally
+	dec  a			; one cell down
+	jp   nz, .loop
+	inc  c			; just finished a row
+
+	ld   a, c
+	cp   ROWS
+	jp   z, .knownret	; exit loop if all rows processed
 	
-; Calculate next generation into wBuffer
+	ld   a, ROWLEN		; reset loop counter 
+	ld   b, $00		; X = 0
+	jp   .loop
+
+.knownret
+	pop  bc
+	ret
+	
+; Calculate next generation for single cell and update in wBuffer2
 ; @param b: X
 ; @param c: Y
 NextGenerationForCell:
 	push af
-	call ScreenToTile
+	push de
+
+	call GetTileOffset
+	ld   d, h
+	ld   e, l		; DE = tile offset
+	ld   hl, wBuffer2	; add offset to read-only back buffer
+	add  hl, de
+
+	; Check current status of cell
 	ld   a, [hl]
 	dec  a
 	jp   z, .alive
@@ -82,22 +132,30 @@ NextGenerationForCell:
 	call CountNeighbors
 	cp   a, 3
 	jp   z, .birth
-	jp   .knownret		; already dead, no need to kill
+	;; jp   .knownret		; already dead, no need to kill
+	jp .death
 .alive
 	call CountNeighbors
 	cp   a, 2		; 2 lives
-	jp   z, .knownret	; already alive, no need to birth
+	;; jp   z, .knownret	; already alive, no need to birth
+	jp   z, .birth
 	cp   a, 3		; 3 lives
-	jp   z, .knownret	; already alive, no need to birth
+	;; jp   z, .knownret	; already alive, no need to birth
+	jp   z, .birth
 	; fallthrough
 .death
-	ld   [hl], $00
+	ld   hl, wBuffer	; load cell address in write-only back buffer
+	add  hl, de
+	ld   [hl], $00		; kill it
 	jp   .knownret
 	
 .birth
-	ld   [hl], $01
+	ld   hl, wBuffer	; load cell address in write-only back buffer
+	add  hl, de
+	ld   [hl], $01		; alive it
 	; fallthrough 
 .knownret
+	pop  de
 	pop  af
 	ret
 
@@ -213,17 +271,19 @@ CountNeighbors:
 	inc a
 	ret
 .knownret
+	; reset to origin (X, Y)
+	dec b
+	dec c
+	
 	pop de
 	pop hl
 	ret
 
-; Get tile at screen coords. Uses BC internally.
-; @param b: x-coord
-; @param c: y-coord
-; @return hl: tile address
-;
-; NOTE: based on the unbricked tutorial
-ScreenToTile:
+; Get tile offset in tilemap. Offsets valid for back buffers or VRAM.
+; @param b: X
+; @param c: Y
+; @return hl: tile offset
+GetTileOffset:
     	push af
     	push bc
     	
@@ -246,13 +306,27 @@ ScreenToTile:
     	adc a, h
     	sub a, l
     	ld  h, a
+
+	pop bc
+	pop af
+	ret
+
+; Get tile at screen coords, using wBuffer2.
+; @param b: x-coord
+; @param c: y-coord
+; @return hl: tile address
+;
+; NOTE: based on the unbricked tutorial
+ScreenToTile:
+    	push bc
+
+	call GetTileOffset
     	
     	; Add the offset to the tilemap's base address, and we are done!
-    	ld bc, wBuffer
+    	ld bc, wBuffer2
     	add hl, bc
     	
     	pop bc
-    	pop af
     	ret
 
 ; Copy data from one location to another
@@ -292,21 +366,21 @@ Tiles:
 TilesEnd:
 
 Tilemap:
-	db $01, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, 0,0,0,0,0,0,0,0,0,0,0,0
-	db $00, $00, $01, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, 0,0,0,0,0,0,0,0,0,0,0,0
-	db $00, $00, $00, $01, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, 0,0,0,0,0,0,0,0,0,0,0,0
-	db $00, $01, $01, $01, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, 0,0,0,0,0,0,0,0,0,0,0,0
+	db $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, 0,0,0,0,0,0,0,0,0,0,0,0
+	db $00, $00, $01, $00, $00, $00, $00, $00, $01, $01, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, 0,0,0,0,0,0,0,0,0,0,0,0
+	db $00, $00, $00, $01, $00, $00, $00, $01, $00, $00, $01, $00, $00, $00, $00, $00, $00, $00, $00, $00, 0,0,0,0,0,0,0,0,0,0,0,0
+	db $00, $01, $01, $01, $00, $00, $00, $00, $01, $01, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, 0,0,0,0,0,0,0,0,0,0,0,0
+	db $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $01, $00, $00, $00, $00, $00, $00, $00, 0,0,0,0,0,0,0,0,0,0,0,0
+	db $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $01, $00, $01, $00, $00, $00, $00, $00, $00, 0,0,0,0,0,0,0,0,0,0,0,0
+	db $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $01, $00, $01, $00, $00, $00, $00, $00, $00, 0,0,0,0,0,0,0,0,0,0,0,0
+	db $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $01, $00, $00, $00, $00, $00, $00, $00, 0,0,0,0,0,0,0,0,0,0,0,0
 	db $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, 0,0,0,0,0,0,0,0,0,0,0,0
 	db $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, 0,0,0,0,0,0,0,0,0,0,0,0
 	db $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, 0,0,0,0,0,0,0,0,0,0,0,0
 	db $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, 0,0,0,0,0,0,0,0,0,0,0,0
-	db $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, 0,0,0,0,0,0,0,0,0,0,0,0
-	db $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, 0,0,0,0,0,0,0,0,0,0,0,0
-	db $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, 0,0,0,0,0,0,0,0,0,0,0,0
-	db $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, 0,0,0,0,0,0,0,0,0,0,0,0
-	db $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, 0,0,0,0,0,0,0,0,0,0,0,0
-	db $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, 0,0,0,0,0,0,0,0,0,0,0,0
-	db $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, 0,0,0,0,0,0,0,0,0,0,0,0
+	db $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $01, $01, $01, $00, $00, $00, $00, $00, 0,0,0,0,0,0,0,0,0,0,0,0
+	db $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $01, $00, $00, $00, $00, $00, $00, $00, 0,0,0,0,0,0,0,0,0,0,0,0
+	db $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $01, $00, $00, $00, $00, $00, $00, 0,0,0,0,0,0,0,0,0,0,0,0
 	db $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, 0,0,0,0,0,0,0,0,0,0,0,0
 	db $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, 0,0,0,0,0,0,0,0,0,0,0,0
 	db $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, $00, 0,0,0,0,0,0,0,0,0,0,0,0
