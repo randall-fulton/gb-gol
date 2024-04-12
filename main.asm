@@ -72,19 +72,6 @@ Main:
 
 	jp Main
 
-; Wait for next VBlank, skipping any in-progress VBlank.
-WaitForNextVBlank:
-	; Ensure we don't start drawing mid-VBlank.
-	; Gives maximal time to execute copy.
-	ld a, [rLY]
-	cp a, 144
-	jr nc, WaitForNextVBlank
-.wait
-	ld a, [rLY]
-	cp a, 144
-	jr c, .wait
-	ret
-
 ; Calculate next generation for entire back buffer (wBuffer)
 NextGeneration:
 	push bc
@@ -157,27 +144,6 @@ NextGenerationForCell:
 .knownret
 	pop  de
 	pop  af
-	ret
-
-; Check if position is within board
-; @param b: X
-; @param c: Y
-; @return C (flag): set when position invalid
-CheckValidPosition:
-	push af
-
-	; Check X in bounds. Works for left and right edges.
-	; X=-1(255); +235 causes overflow
-	; X=21; +235 still causes overflow
-	ld a, b
-	add a, 235
-	jp c, .invalid
-
-	; Check Y in bounds. 
-	ld a, c
-	add a, 237
-.invalid
-	pop af
 	ret
 
 ; Count live neighbors for position.
@@ -328,20 +294,6 @@ ScreenToTile:
     	
     	pop bc
     	ret
-
-; Copy data from one location to another
-; @param de: Source
-; @param hl: Destination
-; @param bc: Length
-Memcopy:
-	ld a, [de]
-	ld [hli], a
-	inc de
-	dec bc
-	ld a, b
-	or a, c
-	jp nz, Memcopy
-	ret
 
 Tiles:
 	; dead
